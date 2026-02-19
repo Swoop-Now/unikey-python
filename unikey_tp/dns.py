@@ -1,26 +1,29 @@
 """DNS-based public key lookup for Trust Packet verification."""
 
 import re
-import base64
 import time
 import threading
 from typing import Optional
 import dns.resolver
 
+from .errors import DNSLookupFailed, DNSInconsistency
+from .configuration import get_configuration
+
+# Backward-compatible aliases
+DNSLookupError = DNSLookupFailed
+DNSInconsistencyError = DNSInconsistency
 
 # Simple TTL cache
 _cache: dict[str, tuple[str, float]] = {}
 _cache_lock = threading.Lock()
-_cache_ttl = 3600  # 1 hour default
 
 # RFC-002 default resolvers
 DEFAULT_RESOLVERS = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
 
 
 def configure(cache_ttl: int = 3600):
-    """Configure DNS settings."""
-    global _cache_ttl
-    _cache_ttl = cache_ttl
+    """Configure DNS settings (writes to global configuration)."""
+    get_configuration().dns_cache_ttl = cache_ttl
 
 
 def clear_cache():
@@ -37,6 +40,7 @@ def lookup_public_key(signer_domain: str, selector: str = "unikey") -> str:
     Queries: {selector}._domainkey.{signer_domain} TXT record
     Returns: base64-encoded public key
     """
+    config = get_configuration()
     cache_key = f"{selector}.{signer_domain}"
 
     with _cache_lock:
@@ -54,12 +58,12 @@ def lookup_public_key(signer_domain: str, selector: str = "unikey") -> str:
             key = _parse_dkim_record(txt)
             if key:
                 with _cache_lock:
-                    _cache[cache_key] = (key, time.time() + _cache_ttl)
+                    _cache[cache_key] = (key, time.time() + config.dns_cache_ttl)
                 return key
     except Exception:
         pass
 
-    raise DNSLookupError(f"Failed to lookup public key for {signer_domain}")
+    raise DNSLookupFailed(signer_domain)
 
 
 def hardened_lookup(
@@ -78,8 +82,9 @@ def hardened_lookup(
         min_consistent: minimum resolvers that must agree
 
     Returns: base64-encoded public key
-    Raises: DNSLookupError if lookup fails or resolvers disagree
+    Raises: DNSLookupFailed if lookup fails, DNSInconsistency if resolvers disagree
     """
+    config = get_configuration()
     cache_key = f"hardened.{selector}.{signer_domain}"
 
     with _cache_lock:
@@ -88,7 +93,7 @@ def hardened_lookup(
             if time.time() < expires:
                 return value
 
-    resolvers = resolvers or DEFAULT_RESOLVERS
+    resolvers = resolvers or config.dns_resolvers or DEFAULT_RESOLVERS
     dns_name = f"{selector}._domainkey.{signer_domain}"
 
     results = {}
@@ -108,7 +113,7 @@ def hardened_lookup(
             continue
 
     if not results:
-        raise DNSLookupError(f"All resolvers failed for {signer_domain}")
+        raise DNSLookupFailed(signer_domain)
 
     # Check consistency
     key_counts: dict[str, int] = {}
@@ -119,13 +124,15 @@ def hardened_lookup(
     agreement = key_counts[best_key]
 
     if agreement < min_consistent:
-        raise DNSInconsistencyError(
-            f"DNS inconsistency for {signer_domain}: "
-            f"only {agreement}/{len(results)} resolvers agree (need {min_consistent})"
+        raise DNSInconsistency(
+            signer_domain,
+            expected=min_consistent,
+            got=agreement,
+            total=len(results),
         )
 
     with _cache_lock:
-        _cache[cache_key] = (best_key, time.time() + _cache_ttl)
+        _cache[cache_key] = (best_key, time.time() + config.dns_cache_ttl)
 
     return best_key
 
@@ -134,11 +141,3 @@ def _parse_dkim_record(txt: str) -> Optional[str]:
     """Parse public key from DKIM-style TXT record."""
     match = re.search(r"p=([A-Za-z0-9+/=]+)", txt)
     return match.group(1) if match else None
-
-
-class DNSLookupError(Exception):
-    pass
-
-
-class DNSInconsistencyError(DNSLookupError):
-    pass

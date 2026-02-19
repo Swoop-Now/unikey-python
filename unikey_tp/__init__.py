@@ -15,27 +15,40 @@ Usage:
         subject="claude@user.example.com",
         audience="orders@acme-store.com",
         action="purchase_item",
-        scope=["purchase:items", "spend:150"],
-        params={"item": "blue purse", "callback_url": "https://device/cb/123"},
-        message="Please purchase a blue purse for my girlfriend.",
         signing_key=kp,
         signer_domain="user.example.com",
     )
 
     # Verify a received packet
     result = TrustPacket.verify(packet.to_dict())
+
+    # Verify a signed HTTP request
+    result = verify_request(request_dict)
 """
 
-from .packet import TrustPacket
+from .packet import TrustPacket, VerifyResult
 from .keypair import KeyPair
 from .canonicalizer import canonicalize, compute_hash
 from .dns import lookup_public_key, hardened_lookup
+from .errors import (
+    UniKeyError, InvalidSignature, ExpiredRequest, MissingHeaders,
+    DNSLookupFailed, UntrustedSigner, InvalidPacket, DNSInconsistency,
+)
+from .configuration import Configuration, configure, get_configuration, reset_configuration
+from .verifier import verify_request, verify_request_safe, VerifiedRequest
 
 __all__ = [
-    "TrustPacket",
-    "KeyPair",
-    "canonicalize",
-    "compute_hash",
-    "lookup_public_key",
-    "hardened_lookup",
+    # Core
+    "TrustPacket", "KeyPair", "VerifyResult",
+    # Canonicalization
+    "canonicalize", "compute_hash",
+    # DNS
+    "lookup_public_key", "hardened_lookup",
+    # HTTP Request Verifier
+    "verify_request", "verify_request_safe", "VerifiedRequest",
+    # Configuration
+    "Configuration", "configure", "get_configuration", "reset_configuration",
+    # Errors
+    "UniKeyError", "InvalidSignature", "ExpiredRequest", "MissingHeaders",
+    "DNSLookupFailed", "UntrustedSigner", "InvalidPacket", "DNSInconsistency",
 ]

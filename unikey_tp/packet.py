@@ -9,6 +9,8 @@ from typing import Optional
 
 from .canonicalizer import canonicalize, compute_hash
 from .keypair import KeyPair
+from .errors import InvalidPacket, ExpiredRequest, InvalidSignature, UntrustedSigner
+from .configuration import get_configuration
 
 
 @dataclass
@@ -126,7 +128,7 @@ class TrustPacket:
     def verify(cls, packet_data: dict, public_key_b64: str = None,
                dns_lookup: bool = True, hardened: bool = False) -> "VerifyResult":
         """
-        Verify a Trust Packet.
+        Verify a Trust Packet (safe — returns VerifyResult, never raises).
 
         Args:
             packet_data: the full packet dict
@@ -142,14 +144,24 @@ class TrustPacket:
             return VerifyResult(valid=False, error=str(e))
 
     @classmethod
+    def verify_strict(cls, packet_data: dict, public_key_b64: str = None,
+                      dns_lookup: bool = True, hardened: bool = False) -> "VerifyResult":
+        """
+        Verify a Trust Packet (strict — raises typed exceptions on failure).
+
+        Raises: InvalidPacket, ExpiredRequest, UntrustedSigner, InvalidSignature
+        """
+        return cls._do_verify(packet_data, public_key_b64, dns_lookup, hardened)
+
+    @classmethod
     def _do_verify(cls, data: dict, public_key_b64: str, dns_lookup: bool, hardened: bool):
         # Validate structure
         for field_name in ("header", "claims", "payload", "signatures"):
             if field_name not in data:
-                raise ValueError(f"Missing field: {field_name}")
+                raise InvalidPacket(f"Missing field: {field_name}")
 
         if not data["signatures"]:
-            raise ValueError("No signatures")
+            raise InvalidPacket("No signatures")
 
         header = data["header"]
         claims_data = data["claims"]
@@ -158,7 +170,13 @@ class TrustPacket:
         # Check expiration
         expires = header.get("expires", 0)
         if expires and int(time.time()) > expires:
-            raise ValueError("Packet expired")
+            raise ExpiredRequest("Packet expired")
+
+        # Check trusted signers
+        config = get_configuration()
+        primary_signer = data["signatures"][0].get("signer", "")
+        if not config.trusted(primary_signer):
+            raise UntrustedSigner(primary_signer)
 
         # Build unsigned portion and canonicalize
         unsigned = {"header": header, "claims": claims_data, "payload": payload_data}
@@ -173,19 +191,31 @@ class TrustPacket:
             if public_key_b64:
                 pk = public_key_b64
             elif dns_lookup:
-                from .dns import lookup_public_key, hardened_lookup
+                from .dns import lookup_public_key, hardened_lookup as dns_hardened
                 if hardened:
-                    pk = hardened_lookup(signer_domain)
+                    pk = dns_hardened(signer_domain)
                 else:
                     pk = lookup_public_key(signer_domain)
             else:
-                raise ValueError("No public key and dns_lookup disabled")
+                raise InvalidPacket("No public key and dns_lookup disabled")
 
             # Verify
-            from nacl.signing import VerifyKey
-            vk = VerifyKey(base64.b64decode(pk))
-            sig_bytes = base64.b64decode(signature_b64)
-            vk.verify(canonical.encode(), sig_bytes)
+            try:
+                from nacl.signing import VerifyKey
+                vk = VerifyKey(base64.b64decode(pk))
+                sig_bytes = base64.b64decode(signature_b64)
+                vk.verify(canonical.encode(), sig_bytes)
+            except InvalidSignature:
+                raise
+            except Exception:
+                raise InvalidSignature(
+                    f"Signature verification failed for signer: {signer_domain}"
+                )
+
+        # Validate delegation chain
+        delegation_chain = claims_data.get("delegation_chain", [])
+        if delegation_chain:
+            cls._validate_delegation_chain(delegation_chain)
 
         return VerifyResult(
             valid=True,
@@ -200,8 +230,15 @@ class TrustPacket:
             message=payload_data.get("message"),
             callback_url=payload_data.get("params", {}).get("callback_url"),
             signer=data["signatures"][0].get("signer"),
-            delegation_chain=claims_data.get("delegation_chain", []),
+            delegation_chain=delegation_chain,
         )
+
+    @staticmethod
+    def _validate_delegation_chain(chain: list):
+        """RFC-001 §5.3: validate delegation chain structure."""
+        for link in chain:
+            if not isinstance(link, str):
+                raise InvalidPacket(f"Delegation chain entry must be a string, got {type(link).__name__}")
 
     def unsigned_dict(self) -> dict:
         """The unsigned portion for signing/verification."""

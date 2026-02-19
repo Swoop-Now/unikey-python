@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "unikey-tp"
+version = "0.2.0"
+description = "UniKey Trust Packet library - create, sign, verify RFC-001 Trust Packets"
+requires-python = ">=3.10"
+dependencies = [
+    "pynacl>=1.5.0",
+    "dnspython>=2.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
